@@ -1,0 +1,19 @@
+fastapi==0.111.0
+requests==2.32.3
+# aiohttp==3.9.5
+pydantic==2.8.2
+starlette==0.37.2
+FlagEmbedding==1.2.10
+# clickhouse-connect
+psycopg2-binary==2.9.9
+torch
+FlagEmbedding
+openai
+python-dotenv
+httpx
+h2
+redis
+asyncpg
+# pymilvus      # Zilliz Cloud client for vector search
+# transformers 
+# einops

@@ -15,5 +15,5 @@ RUN pip install --no-cache-dir --upgrade pip \
 # Expose port 5635 to the world outside this container
 EXPOSE 5637
 
-# Command to run the FastAPI app with Uvicorn on port 5635
-CMD ["uvicorn", "mgov-apiv4-rest:app", "--host", "0.0.0.0", "--port", "5637", "--workers", "4"]
+# Command to run the FastAPI app with gunicorn
+CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "2", "-b", "0.0.0.0:5637", "mgov-apiv4-rest:app"]

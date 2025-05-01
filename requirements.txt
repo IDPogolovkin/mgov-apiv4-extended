@@ -14,6 +14,8 @@ httpx
 h2
 redis
 asyncpg
+gunicorn
+utils
 # pymilvus      # Zilliz Cloud client for vector search
 # transformers 
 # einops

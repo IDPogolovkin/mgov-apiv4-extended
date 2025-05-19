@@ -434,7 +434,7 @@ async def search_postgres(query: str, embedding: List[float], conn, limit: int =
         # Convert the embedding list into a string in the format pgvector expects
         embedding_str = '[' + ','.join(map(str, embedding_list)) + ']'
         
-        # Query the new egov_general_2_ru table
+        # Query the new egov_updated_2_ru table
         results = await conn.fetch("""
             SELECT 
                 name, 
@@ -442,7 +442,7 @@ async def search_postgres(query: str, embedding: List[float], conn, limit: int =
                 "eGov link" AS egov_link, 
                 "mGov link" AS mgov_link,
                 action_link
-            FROM egov_general_2_ru
+            FROM egov_updated_2_ru
             ORDER BY embedding <=> $1::vector
             LIMIT $2
         """, embedding_str, limit)
@@ -461,7 +461,7 @@ async def search_postgres(query: str, embedding: List[float], conn, limit: int =
                 "name": result['name'],
                 "description": result['description'],
                 "link": link,
-                "source": "egov_general_2_ru_pg"
+                "source": "egov_updated_2_ru"
             })
         return services
     except Exception as e:
@@ -618,7 +618,7 @@ async def run_thread(
     ] + history
 
     payload = {
-        "model": "gpt-4o",
+        "model": "gpt-4.1-mini",
         "messages": messages,
     }
     payload_json = json.dumps(payload)

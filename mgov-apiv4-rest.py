@@ -47,17 +47,14 @@ logger = logging.getLogger(__name__)
 
 from config import (
     OPENAI_API_KEY,
-    WEBDIS_URL,
-    WEBDIS_PASSWORD,
     ZILLIZ_REST_URL,
     ZILLIZ_TOKEN,
+    REDIS_URL,
     DB_CONFIG,
-    ADMIN_PASSWORD,
     REDIS_UNAVLB_MSSG, 
     CHAT_HISTORY_TTL,
     API_BEARER_TOKEN,
     SYSTEM_PROMPT,
-    WebdisClient
 )
 
 @asynccontextmanager
@@ -70,19 +67,24 @@ async def lifespan(app: FastAPI):
         "embeddings": False
     }
 
-    # Initialize Webdis client instead of redis.Redis.from_url(...)
-    app.state.redis = WebdisClient(WEBDIS_URL, password=WEBDIS_PASSWORD)
+    redis_url = os.getenv("REDIS_URL", REDIS_URL)
+    # decode_responses=True returns strings instead of bytes
+    app.state.redis = redis.from_url(
+        redis_url,
+        encoding="utf-8",
+        decode_responses=True
+    )
     try:
+        # ping() returns True or raises
         if await app.state.redis.ping():
-            logger.info("Webdis connection established")
+            logger.info("Redis connection established")
             app.state.services_status["redis"] = True
         else:
-            logger.warning("Webdis ping failed")
+            logger.warning("Redis ping failed")
             app.state.redis = None
     except Exception as e:
-        logger.warning(f"Webdis connection failed: {str(e)}")
+        logger.warning(f"Redis connection failed: {e}")
         app.state.redis = None
-
 
     # Collections to load
     collections_to_load = {
@@ -212,7 +214,10 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown
     if app.state.redis:
+        # close the connection pool
         await app.state.redis.close()
+        # and wait for it to shut down
+        await app.state.redis.wait_closed()
     if hasattr(app.state, 'db_pool') and app.state.db_pool is not None:
         await app.state.db_pool.close()
     await app.state.httpx_client.aclose()

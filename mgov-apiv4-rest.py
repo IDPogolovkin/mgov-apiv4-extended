@@ -87,7 +87,7 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Redis connection failed: {e}")
         app.state.redis = None
 
-    # Attempt to load Zilliz collections
+    # Attempt to load Zilliz collection
     try:
         connections.connect(
             alias="default",
@@ -218,7 +218,7 @@ def get_model(request: Request):
     return request.app.state.embeddings_model
 
 def get_collection(request: Request):
-    return request.app.state.collections
+    return request.app.state.collection
 
 def get_httpx_client(request: Request):
     return request.app.state.httpx_client
@@ -288,7 +288,7 @@ async def clean_expired_threads(app):
 # Search Functions
 # -----------------------
 def get_collections(request: Request):
-    return request.app.state.collections
+    return request.app.state.collection
 
 async def search_milvus(
     query: str,
@@ -487,7 +487,7 @@ async def run_thread(
     redis_client=Depends(get_redis),
     conn=Depends(get_db_conn),
     model=Depends(get_model),
-    collections=Depends(get_collection),
+    collection=Depends(get_collection),
     httpx_client=Depends(get_httpx_client)
 ):
     if not redis_client:
@@ -514,7 +514,7 @@ async def run_thread(
     history = [json.loads(m) for m in messages_raw] if messages_raw else []
 
  # Get search results (context) based on the user's question
-    search_results = await get_relevant_services(request_data.user_question, model, conn, collections)
+    search_results = await get_relevant_services(request_data.user_question, model, conn, collection)
     if search_results:
         search_results_text = "\n\n".join(search_results)
     else:
@@ -575,7 +575,7 @@ async def run_thread(
 @app.get("/health")
 async def health_check(
     redis_client=Depends(get_redis),
-    collections=Depends(get_collection),
+    collection=Depends(get_collection),
 ):
     health_status = {
         "status": "healthy",
@@ -596,21 +596,21 @@ async def health_check(
             health_status["status"] = "degraded"
 
     # Check if any collection is available and working
-    if collections and any(collections.values()):
+    if collection and any(collection.values()):
         try:
             # Try to access any valid collection
-            for is_loaded in collections.items():
+            for is_loaded in collection.items():
                 if is_loaded:
                     health_status["services"]["zilliz"] = "up"
                     break
             else:
-                health_status["services"]["zilliz"] = "down: no active collections"
+                health_status["services"]["zilliz"] = "down: no active collection"
                 health_status["status"] = "degraded"
         except Exception as e:
             health_status["services"]["zilliz"] = f"down: {str(e)}"
             health_status["status"] = "degraded"
     else:
-        health_status["services"]["zilliz"] = "down: no collections"
+        health_status["services"]["zilliz"] = "down: no collection"
         health_status["status"] = "degraded"
     try:
         async with app.state.db_pool.acquire() as conn:

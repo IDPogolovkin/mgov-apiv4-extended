@@ -9,9 +9,8 @@ load_dotenv()
 # Global variables
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "xxx")
 REDIS_URL= os.getenv("REDIS_URL", "xxx")
-ZILLIZ_URI = os.getenv("ZILLIZ_URI")
-ZILLIZ_REST_URL = os.getenv("ZILLIZ_REST_URL")
-ZILLIZ_TOKEN = os.getenv("ZILLIZ_TOKEN")
+MILVUS_HOST = os.getenv("MILVUS_HOST", "localhost")
+MILVUS_PORT = os.getenv("MILVUS_PORT", "19530")
 ZILLIZ_COLLECTION = os.getenv("ZILLIZ_COLLECTION", "egov_general_2_ru")
 DB_CONFIG = {
     'host': os.getenv('DB_HOST'),

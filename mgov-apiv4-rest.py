@@ -19,6 +19,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from pymilvus import connections, Collection, utility
 import secrets
 
 from FlagEmbedding import BGEM3FlagModel 
@@ -47,8 +48,8 @@ logger = logging.getLogger(__name__)
 
 from config import (
     OPENAI_API_KEY,
-    ZILLIZ_REST_URL,
-    ZILLIZ_TOKEN,
+    MILVUS_HOST,
+    MILVUS_PORT,
     REDIS_URL,
     DB_CONFIG,
     REDIS_UNAVLB_MSSG, 
@@ -86,67 +87,24 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Redis connection failed: {e}")
         app.state.redis = None
 
-    # Collections to load
-    collections_to_load = {
-        "egov_general_2_ru": False
-    }
-
     # Attempt to load Zilliz collections
     try:
-        list_url = f"{ZILLIZ_REST_URL}/collections/list"
-        headers = {
-            "Authorization": f"Bearer {ZILLIZ_TOKEN}",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-        resp = requests.post(list_url, json={}, headers=headers)
-        resp.raise_for_status()
-        existing_collections = resp.json()["data"]  # List of collection names
-
-        # For each target collection, load and *wait* until loaded (or timeout).
-        for col_name in collections_to_load:
-            if col_name not in existing_collections:
-                logger.error(f"Zilliz collection '{col_name}' not found in /collections/list.")
-                continue
-
-            # 1) Issue load command
-            load_url = f"{ZILLIZ_REST_URL}/collections/load"
-            load_payload = {"collectionName": col_name}
-            load_resp = requests.post(load_url, json=load_payload, headers=headers)
-            load_resp.raise_for_status()
-            logger.info(f"Load command issued for collection '{col_name}'.")
-
-            # 2) Wait for "LoadStateLoaded" with a timeout, e.g. 60s
-            max_wait_seconds = 100
-            waited = 0
-            loaded_success = False
-            while waited < max_wait_seconds:
-                state_url = f"{ZILLIZ_REST_URL}/collections/get_load_state"
-                state_payload = {"collectionName": col_name, "partitionNames": []}
-                state_resp = requests.post(state_url, json=state_payload, headers=headers)
-                state_resp.raise_for_status()
-                load_state = state_resp.json()["data"]["loadState"]  # e.g. "LoadStateLoaded"
-
-                if load_state == "LoadStateLoaded":
-                    logger.info(f"Zilliz collection '{col_name}' loaded successfully.")
-                    collections_to_load[col_name] = True
-                    loaded_success = True
-                    break
-
-                await asyncio.sleep(2)  # Wait a bit before checking again
-                waited += 2
-
-            if not loaded_success:
-                logger.error(f"Timeout waiting for '{col_name}' to load.")
-                collections_to_load[col_name] = False
-
-        # Mark Zilliz as "up" if at least one collection is loaded
-        app.state.collections = collections_to_load
-        app.state.services_status["zilliz"] = any(collections_to_load.values())
-
+        connections.connect(
+            alias="default",
+            host=MILVUS_HOST,
+            port=MILVUS_PORT
+        )
+        collection_name = "egov_general_2_ru"  # Make sure it matches your local collection
+        collection = Collection(collection_name)
+        collection.load()
+        
+        app.state.collection = collection
+        app.state.services_status["milvus"] = True
+        logger.info(f"Connected and loaded collection '{collection_name}'")
     except Exception as e:
-        logger.error(f"Failed to connect/load collections via Zilliz REST: {str(e)}")
-        app.state.collections = {"egov_general_2_ru": False}
+        logger.error(f"Milvus connection failed: {e}")
+        app.state.collection = None
+        app.state.services_status["milvus"] = False
         
     # Create DB connection pool
     try:
@@ -221,23 +179,13 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, 'db_pool') and app.state.db_pool is not None:
         await app.state.db_pool.close()
     await app.state.httpx_client.aclose()
-    if hasattr(app.state, 'collections'):
-        try:
-            headers = {
-                "Authorization": f"Bearer {ZILLIZ_TOKEN}",
-                "Accept": "application/json",
-                "Content-Type": "application/json"
-            }
-
-            for collection_name, is_loaded in app.state.collections.items():
-                if is_loaded:
-                    release_url = f"{ZILLIZ_REST_URL}/collections/release"
-                    payload = {"collectionName": collection_name}
-                    resp = requests.post(release_url, json=payload, headers=headers)
-                    resp.raise_for_status()
-                    print(f"Released collection '{collection_name}' via REST")
-        except Exception as e:
-            print(f"Failed to release collections via REST: {str(e)}")
+    try:
+        if hasattr(app.state, 'collection') and app.state.collection:
+            app.state.collection.release()
+            logger.info("Milvus collection released.")
+    except Exception as e:
+        logger.error(f"Failed to release Milvus collection: {e}")
+    connections.disconnect(alias="default")
     logger.info("Application shutting down, resources released")
 
 # Attach the global Bearer authentication dependency to all endpoints by adding it to the app.
@@ -342,90 +290,50 @@ async def clean_expired_threads(app):
 def get_collections(request: Request):
     return request.app.state.collections
 
-async def search_zilliz(
+async def search_milvus(
     query: str,
     embedding: List[float],
-    collections: Dict[str, bool],
+    collection: Collection,
     limit: int = 2
 ) -> List[Dict]:
-    """
-    Searches the egov_general_2_ru collection via REST using httpx for async requests.
-    Returns the top N (limit) results by score.
-    """
     results = []
 
-    # Convert embedding to a plain Python list (avoid JSON serialization errors)
-    if hasattr(embedding, "tolist"):
-        embedding_list = embedding.tolist()  # for NumPy arrays / torch tensors
-    else:
-        embedding_list = list(embedding)
-
-    headers = {
-        "Authorization": f"Bearer {ZILLIZ_TOKEN}",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+    search_params = {
+        "metric_type": "IP",
+        "params": {"nprobe": 10}
     }
 
-    # Create an async HTTP client
-    async with httpx.AsyncClient(timeout=30) as client:
-        # Search in "egov_general_2_ru"
-        if collections.get("egov_general_2_ru"):
-            try:
-                payload = {
-                    "collectionName": "egov_general_2_ru",
-                    "data": [embedding_list],   # Single-query search
-                    "annsField": "embedding",   # Vector field
-                    "searchParams": {
-                        "metricType": "COSINE",
-                        "params": {"nprobe": 10}
-                    },
-                    "limit": limit,
-                    "outputFields": ["name", "chunks", "action_link", "eGov_link", "mGov_link"]
-                }
+    try:
+        milvus_results = collection.search(
+            data=[embedding],
+            anns_field="embedding",
+            param=search_params,
+            limit=limit,
+            output_fields=["name", "chunks", "action_link", "eGov_link", "mGov_link"]
+        )
 
-                resp = await client.post(
-                    f"{ZILLIZ_REST_URL}/entities/search",
-                    json=payload,
-                    headers=headers
-                )
-                resp.raise_for_status()
-                # Add after the request
-                logger.info(f"Zilliz search response: {resp.json()}")
+        for hits in milvus_results:
+            for hit in hits:
+                data = hit.entity
+                link = data.get("action_link") or data.get("mGov_link") or data.get("eGov_link")
 
-                # "data" is a list of hits
-                hits = resp.json().get("data", [])
+                results.append({
+                    "name": data.get("name", ""),
+                    "description": data.get("chunks", ""),
+                    "link": link,
+                    "score": hit.score,
+                    "source": "egov_general_2_ru"
+                })
 
-                for hit in hits:
-                    try:
-                        score = hit.get("distance", 0)
-                        name = hit.get("name", "")
-                        chunks = hit.get("chunks", "")
-                        action_link = hit.get("action_link", "")
-                        mGov_link = hit.get("mGov_link", "")
-                        eGov_link = hit.get("eGov_link", "")
+        # Explicitly sort by score descending to guarantee consistency
+        results.sort(key=lambda x: x["score"], reverse=True)
 
-                        # Determine which link to use primarily - prioritize action_link
-                        if action_link:
-                            link = action_link
-                        elif mGov_link:
-                            link = mGov_link
-                        else:
-                            link = eGov_link
+        # Log results (as you did previously)
+        logger.info(f"Milvus search results: {results}")
 
-                        results.append({
-                            "name": name,
-                            "description": chunks,
-                            "link": link,
-                            "score": score,
-                            "source": "egov_general_2_ru"
-                        })
-                    except Exception as parse_err:
-                        logger.error(f"Error parsing egov_general_2_ru hit: {parse_err}")
-            except Exception as e:
-                logger.error(f"Zilliz REST search error (egov_general_2_ru): {str(e)}")
+    except Exception as e:
+        logger.error(f"Milvus search error: {str(e)}")
 
-    # Sort results by descending score and return the top 'limit'
-    results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
 
 async def search_postgres(query: str, embedding: List[float], conn, limit: int = 2) -> List[Dict]:
@@ -473,24 +381,23 @@ async def search_postgres(query: str, embedding: List[float], conn, limit: int =
         logger.error(f"PostgreSQL extended search error: {str(e)}")
         return []
     
-async def get_relevant_services(query: str, model, conn, collections) -> List[str]:
+async def get_relevant_services(query: str, model, conn, collection: Collection) -> List[str]:
     embedding = await get_embedding_async(query, model)
-    # Try Zilliz search first
-    if any(collections.values()):
-        zilliz_services = await search_zilliz(query, embedding, collections)
-        if zilliz_services:
-            top_score = zilliz_services[0]['score']
-            logger.info(f"Found {len(zilliz_services)} services in Zilliz with top score: {top_score}")
-            # If top Zilliz score is >= 0.18, accept it.
+    # Try Milvus search first
+    if collection:
+        milvus_services = await search_milvus(query, embedding, collection)
+        if milvus_services:
+            top_score = milvus_services[0]['score']
+            logger.info(f"Found {len(milvus_services)} services in Milvus with top score: {top_score}")
             if top_score >= 0.18:
                 return [
                     f"Name of the service corresponding to the chunk: {service['name']}\n"
                     f"Data about the service: {service['description']}\n"
-                    f"eGov Mobile link of the service: {service['link'] }"
-                    for service in zilliz_services
+                    f"eGov Mobile link of the service: {service['link']}"
+                    for service in milvus_services
                 ]
             else:
-                logger.info(f"Top Zilliz score < 0.18 ({top_score}), falling back to Postgres")
+                logger.info(f"Top Milvus score < 0.18 ({top_score}), falling back to Postgres")
     # Fall back to PostgreSQL search    
     postgres_services = await search_postgres(query, embedding, conn)
     logger.info(f"Found {len(postgres_services)} services in PostgreSQL")

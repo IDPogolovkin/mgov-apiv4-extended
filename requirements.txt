@@ -16,6 +16,6 @@ redis
 asyncpg
 gunicorn
 utils
-# pymilvus      # Zilliz Cloud client for vector search
+pymilvus      # Zilliz Cloud client for vector search
 # transformers 
 # einops
